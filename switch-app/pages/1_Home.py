@@ -1,106 +1,145 @@
+"""
+Home page.
+
+My Active Courses section:
+  - Signed in + semester_path stored → find the semester node, fetch its
+    course_unit children, render as a 2-column colourful tile grid.
+  - Signed in, no semester_path → prompt to complete profile.
+  - Not signed in → prompt to sign in.
+
+The semester_path is stored as a node_path_label string at signup
+(e.g. "KIU/Health Sciences/BMS/Year 3/Semester 1"). tree_store's
+find_node_by_path_label() resolves it to the real node; children_of()
+returns its immediate children (course_unit nodes like Histopathology,
+Chemopathology, etc.).
+
+The colourful tiles cycle through TILE_COLORS by index so each course
+gets a distinct, consistent colour across reruns.
+"""
+
 import streamlit as st
 
 import local_auth
-from local_client import fetch_active_courses, fetch_recently_viewed, fetch_feed, search_courses
-from ui_components import inject_base_css, resource_card, video_resource_card, course_unit_tile, bottom_nav, wordmark
-
-st.set_page_config(page_title="Home | Switch", page_icon="🟠", layout="centered", initial_sidebar_state="collapsed")
-inject_base_css()
-
-user = local_auth.current_user()
-student_id = user["user_id"] if user else "demo-student"
-
-# ---- 1. Header & persistent search ----
-header_cols = st.columns([5, 1])
-with header_cols[0]:
-    wordmark()
-with header_cols[1]:
-    # gap #7 fix: single sign-out control, per rule #8 of the handoff
-    # doc --- exactly the destroy_session + clear-param + clear-resolved-
-    # user + route-to-auth sequence rule #8 specifies, no additional
-    # account UI beyond this one button.
-    if user and st.button("Sign out", key="signout"):
-        local_auth.destroy_session(st.query_params.get("session"))
-        st.query_params.pop("session", None)
-        st.session_state.pop("_resolved_user", None)
-        st.switch_page("pages/0_Auth.py")
-
-query = st.text_input(
-    "Search",
-    placeholder="Search course code, topic, or keyword, e.g. Pathophysiology",
-    label_visibility="collapsed",
+from tree_store import get_store
+from ui_components import (
+    inject_base_css,
+    wordmark,
+    course_unit_tile,
+    bottom_nav,
+    TILE_COLORS,
 )
 
-if query:
-    # gap #6 fix: search_courses() now returns (node_results, link_results),
-    # both carrying the hierarchy-aware tags TreeStore.search() computes ---
-    # a course-unit-level match and a topic/link-title match are shown as
-    # two distinct, labeled result groups rather than one flat list, since
-    # they're genuinely different things (browse into a course vs. jump
-    # straight to a specific resource).
-    node_results, link_results = search_courses(query)
-    if node_results:
-        st.caption("Matching courses")
-        for course in node_results:
-            level_label = course.get("matched_level", "").replace("_", " ").title()
-            if st.button(f"{course['name']} ({level_label})", key=f"searchres_{course['id']}", use_container_width=True):
-                st.session_state["active_course"] = course
-                st.switch_page("pages/3_Course_Detail.py")
-    if link_results:
-        st.caption("Matching resources")
-        for resource in link_results:
-            if resource.get("file_type") == "video":
-                video_resource_card(resource, key_prefix="searchlink")
-            else:
-                resource_card(resource, key_prefix="searchlink")
-    if not node_results and not link_results:
-        st.caption("No matches yet.")
+st.set_page_config(
+    page_title="Home | Switch",
+    page_icon="🟠",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
+inject_base_css()
 
-st.divider()
+# ── Header ──
+col_logo, col_notif, col_avatar = st.columns([3, 1, 1])
+with col_logo:
+    wordmark("1.5rem")
+with col_notif:
+    st.markdown("🔔", unsafe_allow_html=True)
+with col_avatar:
+    user = local_auth.current_user()
+    avatar = user.get("initials", "?") if user else "?"
+    st.markdown(
+        f'<div style="width:32px;height:32px;border-radius:50%;background:#6B7280;'
+        f'color:white;display:flex;align-items:center;justify-content:center;'
+        f'font-size:0.75rem;font-weight:700;">{avatar}</div>',
+        unsafe_allow_html=True,
+    )
 
-# ---- 2. Active Semester fast-lane ----
-st.markdown("#### My Active Courses")
-# gap #1 fix: student_id is now threaded through, so a signed-in user's
-# stored semester (chosen once at signup --- see local_auth.py) resolves
-# to real course-unit tiles instead of always falling back to the tree
-# root. Tile grid replaces the old two-column st.button chip row --- see
-# ui_components.course_unit_tile() for why .course-chip (defined in
-# inject_base_css() from the original build but never actually used
-# anywhere before this) was the right existing style to reuse here.
-courses = fetch_active_courses(student_id=student_id)
-if courses:
-    tile_cols = st.columns(2)
-    for i, course in enumerate(courses):
-        with tile_cols[i % 2]:
-            course_unit_tile(course, key_prefix="home")
+st.markdown("---")
+
+# ── Search ──
+query = st.text_input("", placeholder="🔍  Search notes, topics, courses…", label_visibility="collapsed")
+if query.strip():
+    store = get_store()
+    node_hits, link_hits = store.search(query.strip())
+    if not node_hits and not link_hits:
+        st.caption("No results.")
+    for node in node_hits[:5]:
+        st.markdown(
+            f'<div class="card"><div class="card-meta">{node.get("matched_level","").upper()}</div>'
+            f'<div class="card-title">{node["name"]}</div></div>',
+            unsafe_allow_html=True,
+        )
+    for link in link_hits[:8]:
+        st.markdown(
+            f'<div class="card"><div class="card-meta">RESOURCE</div>'
+            f'<div class="card-title">{link.get("title") or link.get("url","")}</div></div>',
+            unsafe_allow_html=True,
+        )
+    bottom_nav(active="Home")
+    st.stop()
+
+# ── My Active Courses ──
+st.markdown("### My Active Courses")
+
+user = local_auth.current_user()
+
+if not user:
+    st.info("Sign in to see your courses.")
+    if st.button("Sign in →", use_container_width=True):
+        st.switch_page("pages/0_Auth.py")
+
 else:
-    st.caption("No courses found for your semester yet.")
+    semester_path = user.get("semester_path", "").strip()
 
-# gap #1 fix: student_id threaded through so this reflects the signed-in
-# user's real history (local_history.py) instead of always being empty.
-# Also fixes the r['id'] -> r['resource_id'] key mismatch flagged in the
-# handoff doc (rule #5) --- local_history.record_opened() stores entries
-# keyed resource_id, not id; this was previously unreachable dead code
-# (fetch_recently_viewed() always returned [] with no student_id), so the
-# wrong key never actually raised until now.
-recent = fetch_recently_viewed(student_id=student_id)
-if recent:
-    st.markdown("###### Pick up where you left off")
-    for r in recent:
-        cols = st.columns([4, 1])
-        cols[0].write(f"{r['title']} · {r['course_code']}")
-        if cols[1].button("Open", key=f"recent_{r['resource_id']}"):
-            st.session_state["active_resource_id"] = r["resource_id"]
-            st.session_state["_last_opened_resource"] = r
-            st.switch_page("pages/6_Viewer.py")
+    if not semester_path:
+        st.info("Complete your profile to see courses for your semester.")
+        if st.button("Complete profile →", use_container_width=True):
+            st.switch_page("pages/0_Auth.py")
 
-st.divider()
+    else:
+        store = get_store()
+        semester_node = store.find_node_by_path_label(semester_path)
 
-# ---- 3. What's New on Campus feed ----
-st.markdown("#### What's New on Campus")
-feed = fetch_feed()
-for resource in feed:
-    resource_card(resource, key_prefix="feed")
+        if not semester_node:
+            st.warning(f"Semester "{semester_path}" not found in the content tree. "
+                       "Ask your admin to check the import.")
+        else:
+            # Get course_unit children of the semester node.
+            # The tree has a mix of node types at the semester level; filter
+            # to course_unit only so leaf nodes ("Class") don't appear as tiles.
+            all_children = store.children_of(semester_node["id"])
+            course_units = [n for n in all_children if n.get("node_type") == "course_unit"]
+
+            if not course_units:
+                st.info("No course units found for your semester yet.")
+            else:
+                # 2-column grid of colourful tiles
+                pairs = [course_units[i:i+2] for i in range(0, len(course_units), 2)]
+                for pair in pairs:
+                    cols = st.columns(2, gap="small")
+                    for col, node in zip(cols, pair):
+                        color = TILE_COLORS[course_units.index(node) % len(TILE_COLORS)]
+                        course_shape = store.node_to_course_shape(node)
+                        # Override code with actual name abbreviation for display
+                        course_shape["code"] = node["name"][:4].upper()
+                        course_shape["name"] = node["name"]
+                        with col:
+                            course_unit_tile(
+                                course=course_shape,
+                                key_prefix="home",
+                                color=color,
+                            )
+
+st.markdown("---")
+
+# ── What's New on Campus ──
+st.markdown("### What's New on Campus")
+st.caption("Recent uploads from your courses appear here.")
+# Placeholder — wire to a real feed query when the backend is ready
+st.markdown(
+    '<div class="card"><div class="card-meta">COMING SOON</div>'
+    '<div class="card-title">Upload more notes to populate this feed.</div></div>',
+    unsafe_allow_html=True,
+)
 
 st.write("")
 bottom_nav(active="Home")
